@@ -74,7 +74,7 @@ impl eframe::App for QueryMassApp {
                     ui.add_space(4.0);
                     ui.monospace(
                         egui::RichText::new("Os resultados tabulares, linhas afetadas e mensagens por máquina aparecerão aqui.")
-                            .color(color(0xA49AAE)),
+                            .color(color(0x969EB2)),
                     );
                 });
             });
