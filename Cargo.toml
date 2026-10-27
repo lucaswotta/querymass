@@ -1,0 +1,9 @@
+[package]
+name = "querymass"
+version = "0.1.0"
+edition = "2024"
+description = "Aplicativo desktop para executar consultas MySQL em várias máquinas"
+license = "MIT"
+
+[dependencies]
+eframe = "0.33"
