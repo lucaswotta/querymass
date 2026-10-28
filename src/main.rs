@@ -1,7 +1,7 @@
 mod database;
 mod import;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
@@ -92,6 +92,7 @@ struct MysqlDefaults {
 
 struct QueryMassApp {
     machines: Vec<MachineEntry>,
+    folders: BTreeSet<String>,
     next_machine_id: u64,
     query: String,
     defaults: MysqlDefaults,
@@ -101,6 +102,9 @@ struct QueryMassApp {
     pending_delete: Option<DeleteTarget>,
     editing_folder: Option<String>,
     folder_name: String,
+    show_create_folder: bool,
+    new_folder_name: String,
+    folder_error: String,
     show_run_confirmation: bool,
     confirmation_text: String,
     import_message: String,
@@ -125,6 +129,7 @@ impl Default for QueryMassApp {
         let (result_sender, result_receiver) = mpsc::channel();
         Self {
             machines: Vec::new(),
+            folders: BTreeSet::new(),
             next_machine_id: 1,
             query: String::new(),
             defaults: MysqlDefaults::default(),
@@ -134,6 +139,9 @@ impl Default for QueryMassApp {
             pending_delete: None,
             editing_folder: None,
             folder_name: String::new(),
+            show_create_folder: false,
+            new_folder_name: String::new(),
+            folder_error: String::new(),
             show_run_confirmation: false,
             confirmation_text: String::new(),
             import_message: String::new(),
@@ -212,6 +220,11 @@ impl eframe::App for QueryMassApp {
                 if ui.button("＋ Máquina").clicked() {
                     self.open_new_machine();
                 }
+                if ui.button("＋ Pasta").clicked() {
+                    self.new_folder_name.clear();
+                    self.folder_error.clear();
+                    self.show_create_folder = true;
+                }
                 if ui.button("Importar planilha").clicked() {
                     self.import_connections();
                 }
@@ -267,6 +280,7 @@ impl eframe::App for QueryMassApp {
         });
 
         self.show_add_machine_window(context);
+        self.show_create_folder_window(context);
         self.show_delete_confirmation(context);
         self.show_folder_editor(context);
         self.show_run_confirmation_window(context);
@@ -306,21 +320,6 @@ impl QueryMassApp {
         }
         ui.separator();
 
-        if self.machines.is_empty() {
-            ui.vertical_centered(|ui| {
-                ui.add_space(24.0);
-                ui.label(egui::RichText::new("▣").size(24.0).color(color(0x697187)));
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new("Nenhuma máquina").strong());
-                ui.label(
-                    egui::RichText::new("Cadastre uma conexão ou importe uma planilha.")
-                        .size(12.0)
-                        .color(color(0x969EB2)),
-                );
-            });
-            return;
-        }
-
         let mut root_machines = Vec::new();
         let mut folders: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for (index, machine) in self.machines.iter().enumerate() {
@@ -333,39 +332,85 @@ impl QueryMassApp {
                     .push(index);
             }
         }
+        for folder in &self.folders {
+            folders.entry(folder.clone()).or_default();
+        }
+        if self.machines.is_empty() && folders.is_empty() {
+            ui.vertical_centered(|ui| {
+                ui.add_space(24.0);
+                ui.label(egui::RichText::new("▣").size(24.0).color(color(0x697187)));
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("Nenhuma máquina ou pasta").strong());
+                ui.label(
+                    egui::RichText::new(
+                        "Adicione uma máquina ou crie uma pasta pela barra superior.",
+                    )
+                    .size(12.0)
+                    .color(color(0x969EB2)),
+                );
+            });
+            return;
+        }
 
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for index in root_machines {
-                self.show_machine_row(ui, index);
+            let (_root_contents, root_payload) =
+                ui.dnd_drop_zone::<u64, _>(egui::Frame::NONE, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("RAIZ")
+                                .size(11.0)
+                                .strong()
+                                .color(color(0x969EB2)),
+                        )
+                        .on_hover_text("Solte uma máquina aqui para movê-la para a raiz.");
+                        ui.label(
+                            egui::RichText::new(format!("· {}", root_machines.len()))
+                                .size(11.0)
+                                .color(color(0x697187)),
+                        );
+                    });
+                    for index in &root_machines {
+                        self.show_machine_row(ui, *index);
+                    }
+                });
+            if let Some(machine_id) = root_payload {
+                self.move_machine_to_folder(*machine_id, "");
             }
             for (folder, indexes) in folders {
-                let all_selected = indexes.iter().all(|index| self.machines[*index].selected);
+                let all_selected = !indexes.is_empty()
+                    && indexes.iter().all(|index| self.machines[*index].selected);
                 let mut select_folder = all_selected;
-                ui.horizontal(|ui| {
-                    if ui.checkbox(&mut select_folder, "").changed() {
-                        for index in &indexes {
-                            self.machines[*index].selected = select_folder;
-                        }
-                    }
-                    let folder_header =
-                        ui.collapsing(format!("{folder}  ·  {}", indexes.len()), |ui| {
-                            for index in &indexes {
-                                self.show_machine_row(ui, *index);
+                let (_folder_contents, folder_payload) =
+                    ui.dnd_drop_zone::<u64, _>(egui::Frame::NONE, |ui| {
+                        ui.horizontal(|ui| {
+                            if ui.checkbox(&mut select_folder, "").changed() {
+                                for index in &indexes {
+                                    self.machines[*index].selected = select_folder;
+                                }
                             }
+                            let folder_header =
+                                ui.collapsing(format!("{folder}  ·  {}", indexes.len()), |ui| {
+                                    for index in &indexes {
+                                        self.show_machine_row(ui, *index);
+                                    }
+                                });
+                            folder_header.header_response.context_menu(|ui| {
+                                if ui.button("Renomear pasta…").clicked() {
+                                    self.folder_name = folder.clone();
+                                    self.editing_folder = Some(folder.clone());
+                                    ui.close();
+                                }
+                                if ui.button("Excluir pasta…").clicked() {
+                                    self.pending_delete =
+                                        Some(DeleteTarget::Folder(folder.clone(), indexes.len()));
+                                    ui.close();
+                                }
+                            });
                         });
-                    folder_header.header_response.context_menu(|ui| {
-                        if ui.button("Renomear pasta…").clicked() {
-                            self.folder_name = folder.clone();
-                            self.editing_folder = Some(folder.clone());
-                            ui.close();
-                        }
-                        if ui.button("Excluir pasta e máquinas…").clicked() {
-                            self.pending_delete =
-                                Some(DeleteTarget::Folder(folder.clone(), indexes.len()));
-                            ui.close();
-                        }
                     });
-                });
+                if let Some(machine_id) = folder_payload {
+                    self.move_machine_to_folder(*machine_id, &folder);
+                }
             }
         });
     }
@@ -373,43 +418,64 @@ impl QueryMassApp {
     fn show_machine_row(&mut self, ui: &mut egui::Ui, index: usize) {
         let machine_id = self.machines[index].id;
         let machine_name = self.machines[index].connection.name.clone();
-        ui.horizontal(|ui| {
-            let machine = &mut self.machines[index];
-            ui.checkbox(&mut machine.selected, "");
-            let details = ui.vertical(|ui| {
-                ui.label(egui::RichText::new(&machine.connection.name).strong());
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{}:{}  ·  {}",
-                        machine.connection.host,
-                        machine.connection.port,
-                        if machine.connection.database.is_empty() {
-                            "sem banco padrão"
-                        } else {
-                            &machine.connection.database
-                        }
-                    ))
-                    .monospace()
-                    .size(11.0)
-                    .color(color(0x969EB2)),
-                );
-            });
-            details
-                .response
-                .interact(egui::Sense::click())
-                .context_menu(|ui| {
-                    if ui.button("Configurar máquina…").clicked() {
-                        self.edit_machine(machine_id);
-                        ui.close();
-                    }
-                    if ui.button("Excluir máquina…").clicked() {
-                        self.pending_delete =
-                            Some(DeleteTarget::Machine(machine_id, machine_name.clone()));
-                        ui.close();
-                    }
-                });
-        });
-        ui.add_space(4.0);
+        let drag_source = ui.dnd_drag_source(
+            egui::Id::new(("machine_drag_source", machine_id)),
+            machine_id,
+            |ui| {
+                ui.horizontal(|ui| {
+                    let machine = &mut self.machines[index];
+                    ui.checkbox(&mut machine.selected, "");
+                    let details = ui.vertical(|ui| {
+                        ui.label(egui::RichText::new(&machine.connection.name).strong());
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{}:{}  ·  {}",
+                                machine.connection.host,
+                                machine.connection.port,
+                                if machine.connection.database.is_empty() {
+                                    "sem banco padrão"
+                                } else {
+                                    &machine.connection.database
+                                }
+                            ))
+                            .monospace()
+                            .size(11.0)
+                            .color(color(0x969EB2)),
+                        );
+                    });
+                    details
+                        .response
+                        .interact(egui::Sense::click())
+                        .context_menu(|ui| {
+                            if ui.button("Configurar máquina…").clicked() {
+                                self.edit_machine(machine_id);
+                                ui.close();
+                            }
+                            if ui.button("Excluir máquina…").clicked() {
+                                self.pending_delete =
+                                    Some(DeleteTarget::Machine(machine_id, machine_name.clone()));
+                                ui.close();
+                            }
+                        });
+                })
+            },
+        );
+        drag_source.response.on_hover_text(
+            "Arraste esta máquina para uma pasta. Use o botão direito para configurar ou excluir.",
+        );
+    }
+
+    fn move_machine_to_folder(&mut self, machine_id: u64, folder: &str) {
+        if let Some(machine) = self
+            .machines
+            .iter_mut()
+            .find(|machine| machine.id == machine_id)
+        {
+            machine.connection.folder = folder.to_owned();
+        }
+        if !folder.is_empty() {
+            self.folders.insert(folder.to_owned());
+        }
     }
 
     fn show_output_panel(&mut self, ui: &mut egui::Ui) {
@@ -552,6 +618,9 @@ impl QueryMassApp {
                             .iter_mut()
                             .find(|machine| machine.id == machine_id)
                         {
+                            if !connection.folder.trim().is_empty() {
+                                self.folders.insert(connection.folder.clone());
+                            }
                             machine.connection = connection;
                         }
                     } else {
@@ -617,7 +686,7 @@ impl QueryMassApp {
             }
             DeleteTarget::Folder(folder, count) => (
                 "Excluir pasta",
-                format!("Excluir a pasta {folder} e suas {count} máquinas?"),
+                format!("Excluir a pasta {folder}? {count} máquina(s) serão movidas para a raiz."),
             ),
         };
         let mut open = true;
@@ -641,9 +710,14 @@ impl QueryMassApp {
         if confirm {
             match self.pending_delete.take().expect("pending deletion exists") {
                 DeleteTarget::Machine(id, _) => self.machines.retain(|machine| machine.id != id),
-                DeleteTarget::Folder(folder, _) => self
-                    .machines
-                    .retain(|machine| machine.connection.folder != folder),
+                DeleteTarget::Folder(folder, _) => {
+                    for machine in &mut self.machines {
+                        if machine.connection.folder == folder {
+                            machine.connection.folder.clear();
+                        }
+                    }
+                    self.folders.remove(&folder);
+                }
             }
         } else if cancel || !open {
             self.pending_delete = None;
@@ -673,9 +747,48 @@ impl QueryMassApp {
                     machine.connection.folder = new_folder.clone();
                 }
             }
+            self.folders.remove(&old_folder);
+            if !new_folder.is_empty() {
+                self.folders.insert(new_folder);
+            }
             self.editing_folder = None;
         } else if !open {
             self.editing_folder = None;
+        }
+    }
+
+    fn show_create_folder_window(&mut self, context: &egui::Context) {
+        if !self.show_create_folder {
+            return;
+        }
+        let mut open = self.show_create_folder;
+        let mut create = false;
+        egui::Window::new("Criar pasta")
+            .open(&mut open)
+            .resizable(false)
+            .show(context, |ui| {
+                ui.label("Nome da pasta");
+                ui.text_edit_singleline(&mut self.new_folder_name);
+                if !self.folder_error.is_empty() {
+                    ui.label(egui::RichText::new(&self.folder_error).color(color(0xFF5D70)));
+                }
+                ui.add_space(8.0);
+                if ui.button("Criar pasta").clicked() {
+                    create = true;
+                }
+            });
+        self.show_create_folder = open;
+        if create {
+            let name = self.new_folder_name.trim().to_owned();
+            if name.is_empty() {
+                self.folder_error = "Informe um nome para a pasta.".to_owned();
+            } else if self.folders.contains(&name) {
+                self.folder_error = "Já existe uma pasta com esse nome.".to_owned();
+            } else {
+                self.folders.insert(name);
+                self.show_create_folder = false;
+                self.folder_error.clear();
+            }
         }
     }
 
@@ -821,6 +934,9 @@ impl QueryMassApp {
     }
 
     fn add_machine(&mut self, connection: MachineConnection) {
+        if !connection.folder.trim().is_empty() {
+            self.folders.insert(connection.folder.clone());
+        }
         self.machines.push(MachineEntry {
             id: self.next_machine_id,
             selected: true,
