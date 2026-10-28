@@ -373,68 +373,72 @@ impl QueryMassApp {
             for (folder, indexes) in folders {
                 let all_selected = indexes.iter().all(|index| self.machines[*index].selected);
                 let mut select_folder = all_selected;
-                let row = ui.horizontal(|ui| {
+                ui.horizontal(|ui| {
                     if ui.checkbox(&mut select_folder, "").changed() {
                         for index in &indexes {
                             self.machines[*index].selected = select_folder;
                         }
                     }
-                    ui.collapsing(format!("{folder}  ·  {}", indexes.len()), |ui| {
-                        for index in &indexes {
-                            let machine_id = self.machines[*index].id;
-                            let machine_name = self.machines[*index].connection.name.clone();
-                            let machine_row = ui.horizontal(|ui| {
-                                let machine = &mut self.machines[*index];
-                                ui.checkbox(&mut machine.selected, "");
-                                ui.vertical(|ui| {
-                                    ui.label(
-                                        egui::RichText::new(&machine.connection.name).strong(),
-                                    );
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "{}:{}  ·  {}",
-                                            machine.connection.host,
-                                            machine.connection.port,
-                                            if machine.connection.database.is_empty() {
-                                                "sem banco padrão"
-                                            } else {
-                                                &machine.connection.database
+                    let folder_header =
+                        ui.collapsing(format!("{folder}  ·  {}", indexes.len()), |ui| {
+                            for index in &indexes {
+                                let machine_id = self.machines[*index].id;
+                                let machine_name = self.machines[*index].connection.name.clone();
+                                ui.horizontal(|ui| {
+                                    let machine = &mut self.machines[*index];
+                                    ui.checkbox(&mut machine.selected, "");
+                                    let details = ui.vertical(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(&machine.connection.name).strong(),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "{}:{}  ·  {}",
+                                                machine.connection.host,
+                                                machine.connection.port,
+                                                if machine.connection.database.is_empty() {
+                                                    "sem banco padrão"
+                                                } else {
+                                                    &machine.connection.database
+                                                }
+                                            ))
+                                            .monospace()
+                                            .size(11.0)
+                                            .color(color(0x969EB2)),
+                                        );
+                                    });
+                                    details
+                                        .response
+                                        .interact(egui::Sense::click())
+                                        .context_menu(|ui| {
+                                            if ui.button("Configurar máquina…").clicked() {
+                                                self.edit_machine(machine_id);
+                                                ui.close();
                                             }
-                                        ))
-                                        .monospace()
-                                        .size(11.0)
-                                        .color(color(0x969EB2)),
-                                    );
+                                            if ui.button("Excluir máquina…").clicked() {
+                                                self.pending_delete = Some(DeleteTarget::Machine(
+                                                    machine_id,
+                                                    machine_name.clone(),
+                                                ));
+                                                ui.close();
+                                            }
+                                        });
                                 });
-                            });
-                            machine_row.response.context_menu(|ui| {
-                                if ui.button("Configurar máquina…").clicked() {
-                                    self.edit_machine(machine_id);
-                                    ui.close();
-                                }
-                                if ui.button("Excluir máquina…").clicked() {
-                                    self.pending_delete = Some(DeleteTarget::Machine(
-                                        machine_id,
-                                        machine_name.clone(),
-                                    ));
-                                    ui.close();
-                                }
-                            });
-                            ui.add_space(4.0);
+                                ui.add_space(4.0);
+                            }
+                        });
+                    folder_header.header_response.context_menu(|ui| {
+                        if ui.button("Renomear pasta…").clicked() {
+                            self.folder_name = folder.clone();
+                            self.editing_folder = Some(folder.clone());
+                            ui.close();
+                        }
+                        if ui.button("Excluir pasta e máquinas…").clicked() {
+                            self.pending_delete =
+                                Some(DeleteTarget::Folder(folder.clone(), indexes.len()));
+                            ui.close();
                         }
                     });
-                });
-                row.response.context_menu(|ui| {
-                    if ui.button("Renomear pasta…").clicked() {
-                        self.folder_name = folder.clone();
-                        self.editing_folder = Some(folder.clone());
-                        ui.close();
-                    }
-                    if ui.button("Excluir pasta e máquinas…").clicked() {
-                        self.pending_delete =
-                            Some(DeleteTarget::Folder(folder.clone(), indexes.len()));
-                        ui.close();
-                    }
                 });
             }
         });
