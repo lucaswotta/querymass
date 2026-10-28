@@ -101,13 +101,14 @@ struct QueryMassApp {
     pending_delete: Option<DeleteTarget>,
     editing_folder: Option<String>,
     folder_name: String,
-    show_defaults: bool,
     show_run_confirmation: bool,
     confirmation_text: String,
     import_message: String,
     status_message: String,
     form_error: String,
     outputs: Vec<QueryOutput>,
+    terminal_output: String,
+    select_all_output: bool,
     running: bool,
     pending_results: usize,
     result_sender: mpsc::Sender<QueryOutput>,
@@ -133,13 +134,14 @@ impl Default for QueryMassApp {
             pending_delete: None,
             editing_folder: None,
             folder_name: String::new(),
-            show_defaults: false,
             show_run_confirmation: false,
             confirmation_text: String::new(),
             import_message: String::new(),
             status_message: String::new(),
             form_error: String::new(),
             outputs: Vec::new(),
+            terminal_output: String::new(),
+            select_all_output: false,
             running: false,
             pending_results: 0,
             result_sender,
@@ -164,8 +166,8 @@ impl eframe::App for QueryMassApp {
                         self.import_connections();
                         ui.close();
                     }
-                    if ui.button("Credenciais padrão…").clicked() {
-                        self.show_defaults = true;
+                    if ui.button("Modelo CSV…").clicked() {
+                        self.save_csv_template();
                         ui.close();
                     }
                     if ui.button("Sair").clicked() {
@@ -207,31 +209,11 @@ impl eframe::App for QueryMassApp {
                 ui.label(egui::RichText::new("QueryMass").strong().size(16.0));
                 ui.label(egui::RichText::new("MySQL").color(color(0x969EB2)));
                 ui.separator();
-                if ui.button("＋ Conexão").clicked() {
+                if ui.button("＋ Máquina").clicked() {
                     self.open_new_machine();
                 }
-                if ui.button("Importar").clicked() {
+                if ui.button("Importar planilha").clicked() {
                     self.import_connections();
-                }
-                if ui.button("Credenciais").clicked() {
-                    self.show_defaults = true;
-                }
-                ui.separator();
-                let selected = self.selected_count();
-                ui.label(format!("{selected} selecionada(s)"));
-                let label = if self.running {
-                    "Executando…"
-                } else {
-                    "▶ Executar SQL"
-                };
-                if ui
-                    .add_enabled(
-                        !self.running,
-                        egui::Button::new(label).fill(color(0x4F8CFF)),
-                    )
-                    .clicked()
-                {
-                    self.request_query_execution();
                 }
             });
         });
@@ -287,7 +269,6 @@ impl eframe::App for QueryMassApp {
         self.show_add_machine_window(context);
         self.show_delete_confirmation(context);
         self.show_folder_editor(context);
-        self.show_defaults_window(context);
         self.show_run_confirmation_window(context);
     }
 }
@@ -316,25 +297,6 @@ impl QueryMassApp {
                 }
             });
         });
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            if ui.button("＋ Manual").clicked() {
-                self.machine_form = MachineForm::new(&self.defaults);
-                self.form_error.clear();
-                self.show_add_machine = true;
-            }
-            if ui.button("Importar CSV / Excel").clicked() {
-                self.import_connections();
-            }
-        });
-        ui.horizontal(|ui| {
-            if ui.button("Credenciais padrão").clicked() {
-                self.show_defaults = true;
-            }
-            if ui.button("Modelo CSV").clicked() {
-                self.save_csv_template();
-            }
-        });
         if !self.import_message.is_empty() {
             ui.label(
                 egui::RichText::new(&self.import_message)
@@ -359,17 +321,23 @@ impl QueryMassApp {
             return;
         }
 
+        let mut root_machines = Vec::new();
         let mut folders: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for (index, machine) in self.machines.iter().enumerate() {
-            let folder = if machine.connection.folder.trim().is_empty() {
-                "Sem pasta".to_owned()
+            if machine.connection.folder.trim().is_empty() {
+                root_machines.push(index);
             } else {
-                machine.connection.folder.clone()
-            };
-            folders.entry(folder).or_default().push(index);
+                folders
+                    .entry(machine.connection.folder.clone())
+                    .or_default()
+                    .push(index);
+            }
         }
 
         egui::ScrollArea::vertical().show(ui, |ui| {
+            for index in root_machines {
+                self.show_machine_row(ui, index);
+            }
             for (folder, indexes) in folders {
                 let all_selected = indexes.iter().all(|index| self.machines[*index].selected);
                 let mut select_folder = all_selected;
@@ -382,49 +350,7 @@ impl QueryMassApp {
                     let folder_header =
                         ui.collapsing(format!("{folder}  ·  {}", indexes.len()), |ui| {
                             for index in &indexes {
-                                let machine_id = self.machines[*index].id;
-                                let machine_name = self.machines[*index].connection.name.clone();
-                                ui.horizontal(|ui| {
-                                    let machine = &mut self.machines[*index];
-                                    ui.checkbox(&mut machine.selected, "");
-                                    let details = ui.vertical(|ui| {
-                                        ui.label(
-                                            egui::RichText::new(&machine.connection.name).strong(),
-                                        );
-                                        ui.label(
-                                            egui::RichText::new(format!(
-                                                "{}:{}  ·  {}",
-                                                machine.connection.host,
-                                                machine.connection.port,
-                                                if machine.connection.database.is_empty() {
-                                                    "sem banco padrão"
-                                                } else {
-                                                    &machine.connection.database
-                                                }
-                                            ))
-                                            .monospace()
-                                            .size(11.0)
-                                            .color(color(0x969EB2)),
-                                        );
-                                    });
-                                    details
-                                        .response
-                                        .interact(egui::Sense::click())
-                                        .context_menu(|ui| {
-                                            if ui.button("Configurar máquina…").clicked() {
-                                                self.edit_machine(machine_id);
-                                                ui.close();
-                                            }
-                                            if ui.button("Excluir máquina…").clicked() {
-                                                self.pending_delete = Some(DeleteTarget::Machine(
-                                                    machine_id,
-                                                    machine_name.clone(),
-                                                ));
-                                                ui.close();
-                                            }
-                                        });
-                                });
-                                ui.add_space(4.0);
+                                self.show_machine_row(ui, *index);
                             }
                         });
                     folder_header.header_response.context_menu(|ui| {
@@ -444,10 +370,52 @@ impl QueryMassApp {
         });
     }
 
-    fn show_output_panel(&self, ui: &mut egui::Ui) {
+    fn show_machine_row(&mut self, ui: &mut egui::Ui, index: usize) {
+        let machine_id = self.machines[index].id;
+        let machine_name = self.machines[index].connection.name.clone();
+        ui.horizontal(|ui| {
+            let machine = &mut self.machines[index];
+            ui.checkbox(&mut machine.selected, "");
+            let details = ui.vertical(|ui| {
+                ui.label(egui::RichText::new(&machine.connection.name).strong());
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}:{}  ·  {}",
+                        machine.connection.host,
+                        machine.connection.port,
+                        if machine.connection.database.is_empty() {
+                            "sem banco padrão"
+                        } else {
+                            &machine.connection.database
+                        }
+                    ))
+                    .monospace()
+                    .size(11.0)
+                    .color(color(0x969EB2)),
+                );
+            });
+            details
+                .response
+                .interact(egui::Sense::click())
+                .context_menu(|ui| {
+                    if ui.button("Configurar máquina…").clicked() {
+                        self.edit_machine(machine_id);
+                        ui.close();
+                    }
+                    if ui.button("Excluir máquina…").clicked() {
+                        self.pending_delete =
+                            Some(DeleteTarget::Machine(machine_id, machine_name.clone()));
+                        ui.close();
+                    }
+                });
+        });
+        ui.add_space(4.0);
+    }
+
+    fn show_output_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(
-                egui::RichText::new("SAÍDA")
+                egui::RichText::new("TERMINAL / RESULTADOS")
                     .size(11.0)
                     .strong()
                     .color(color(0x969EB2)),
@@ -471,64 +439,38 @@ impl QueryMassApp {
         if !self.status_message.is_empty() {
             ui.label(egui::RichText::new(&self.status_message).color(color(0xFF5D70)));
         }
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            if self.outputs.is_empty() {
-                ui.add_space(4.0);
-                ui.monospace(
-                    egui::RichText::new("Os resultados e mensagens por máquina aparecerão aqui.")
-                        .color(color(0x969EB2)),
-                );
+        let output_editor = egui::TextEdit::multiline(&mut self.terminal_output)
+            .code_editor()
+            .hint_text("Resultados SQL e mensagens por máquina aparecerão aqui. Clique com o botão direito para opções.")
+            .desired_rows((ui.available_height() / 18.0).max(8.0) as usize)
+            .desired_width(f32::INFINITY)
+            .show(ui);
+        output_editor.response.context_menu(|ui| {
+            if ui.button("Copiar tudo").clicked() {
+                ui.ctx().copy_text(self.terminal_output.clone());
+                ui.close();
             }
-            for (index, output) in self.outputs.iter().enumerate() {
-                ui.add_space(6.0);
-                if let Some(error) = &output.error {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "●  {}  ·  {}  ·  {error}",
-                            output.machine_name, output.host
-                        ))
-                        .color(color(0xFF5D70)),
-                    );
-                    continue;
-                }
-                ui.label(
-                    egui::RichText::new(format!("●  {}  ·  {}", output.machine_name, output.host))
-                        .color(color(0x4F8CFF)),
-                );
-                if output.columns.is_empty() {
-                    ui.label(format!("Linhas afetadas: {}", output.affected_rows));
-                    continue;
-                }
-                if output.rows.is_empty() {
-                    ui.label("Consulta executada sem linhas retornadas.");
-                } else {
-                    egui::ScrollArea::horizontal()
-                        .id_salt(("result", index))
-                        .show(ui, |ui| {
-                            egui::Grid::new(("result_grid", index))
-                                .striped(true)
-                                .show(ui, |ui| {
-                                    for column in &output.columns {
-                                        ui.strong(column);
-                                    }
-                                    ui.end_row();
-                                    for row in &output.rows {
-                                        for value in row {
-                                            ui.label(value);
-                                        }
-                                        ui.end_row();
-                                    }
-                                });
-                        });
-                }
-                if output.truncated {
-                    ui.label(
-                        egui::RichText::new("Exibindo as primeiras 1.000 linhas.")
-                            .color(color(0xFF5D70)),
-                    );
-                }
+            if ui.button("Selecionar tudo").clicked() {
+                self.select_all_output = true;
+                ui.close();
+            }
+            if ui.button("Limpar saída").clicked() {
+                self.outputs.clear();
+                self.terminal_output.clear();
+                ui.close();
             }
         });
+        if self.select_all_output {
+            let mut state = egui::TextEdit::load_state(ui.ctx(), output_editor.response.id)
+                .unwrap_or(output_editor.state);
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::select_all(
+                    &output_editor.galley,
+                )));
+            state.store(ui.ctx(), output_editor.response.id);
+            self.select_all_output = false;
+        }
     }
 
     fn show_add_machine_window(&mut self, context: &egui::Context) {
@@ -574,6 +516,19 @@ impl QueryMassApp {
                         );
                         ui.end_row();
                     });
+                ui.collapsing("Credenciais padrão para novas conexões", |ui| {
+                    ui.label("Usadas quando usuário ou senha ficarem em branco.");
+                    ui.horizontal(|ui| {
+                        ui.label("Usuário");
+                        ui.text_edit_singleline(&mut self.defaults.username);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Senha");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.defaults.password).password(true),
+                        );
+                    });
+                });
                 ui.add_space(8.0);
                 let submit_label = if self.editing_machine_id.is_some() {
                     "Salvar alterações"
@@ -609,36 +564,6 @@ impl QueryMassApp {
                 Err(error) => self.form_error = error,
             }
         }
-    }
-
-    fn show_defaults_window(&mut self, context: &egui::Context) {
-        if !self.show_defaults {
-            return;
-        }
-        let mut open = self.show_defaults;
-        egui::Window::new("Credenciais padrão MySQL")
-            .open(&mut open)
-            .resizable(false)
-            .show(context, |ui| {
-                ui.label("Usadas quando a máquina não define usuário ou senha próprios.");
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label("Usuário");
-                    ui.text_edit_singleline(&mut self.defaults.username);
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Senha");
-                    ui.add(egui::TextEdit::singleline(&mut self.defaults.password).password(true));
-                });
-                ui.label(
-                    egui::RichText::new(
-                        "As credenciais ficam apenas na memória durante esta sessão.",
-                    )
-                    .size(11.0)
-                    .color(color(0x969EB2)),
-                );
-            });
-        self.show_defaults = open;
     }
 
     fn open_new_machine(&mut self) {
@@ -716,14 +641,9 @@ impl QueryMassApp {
         if confirm {
             match self.pending_delete.take().expect("pending deletion exists") {
                 DeleteTarget::Machine(id, _) => self.machines.retain(|machine| machine.id != id),
-                DeleteTarget::Folder(folder, _) => self.machines.retain(|machine| {
-                    let machine_folder = if machine.connection.folder.trim().is_empty() {
-                        "Sem pasta"
-                    } else {
-                        &machine.connection.folder
-                    };
-                    machine_folder != folder
-                }),
+                DeleteTarget::Folder(folder, _) => self
+                    .machines
+                    .retain(|machine| machine.connection.folder != folder),
             }
         } else if cancel || !open {
             self.pending_delete = None;
@@ -747,18 +667,9 @@ impl QueryMassApp {
                 }
             });
         if save {
-            let new_folder = if self.folder_name.trim() == "Sem pasta" {
-                String::new()
-            } else {
-                self.folder_name.trim().to_owned()
-            };
+            let new_folder = self.folder_name.trim().to_owned();
             for machine in &mut self.machines {
-                let current_folder = if machine.connection.folder.trim().is_empty() {
-                    "Sem pasta"
-                } else {
-                    &machine.connection.folder
-                };
-                if current_folder == old_folder {
+                if machine.connection.folder == old_folder {
                     machine.connection.folder = new_folder.clone();
                 }
             }
@@ -947,6 +858,7 @@ impl QueryMassApp {
         }
         self.status_message.clear();
         self.outputs.clear();
+        self.terminal_output.clear();
         self.pending_results = selected.len();
         self.running = true;
         let query = self.query.clone();
@@ -978,6 +890,7 @@ impl QueryMassApp {
 
     fn receive_query_outputs(&mut self) {
         while let Ok(output) = self.result_receiver.try_recv() {
+            self.terminal_output.push_str(&format_query_output(&output));
             self.outputs.push(output);
             self.pending_results = self.pending_results.saturating_sub(1);
             if self.pending_results == 0 {
@@ -985,6 +898,29 @@ impl QueryMassApp {
             }
         }
     }
+}
+
+fn format_query_output(output: &QueryOutput) -> String {
+    let mut text = format!("{} · {}\n", output.machine_name, output.host);
+    if let Some(error) = &output.error {
+        text.push_str(&format!("ERRO: {error}\n\n"));
+        return text;
+    }
+    if output.columns.is_empty() {
+        text.push_str(&format!("Linhas afetadas: {}\n\n", output.affected_rows));
+        return text;
+    }
+    text.push_str(&output.columns.join("\t"));
+    text.push('\n');
+    for row in &output.rows {
+        text.push_str(&row.join("\t"));
+        text.push('\n');
+    }
+    if output.truncated {
+        text.push_str("Exibindo as primeiras 1.000 linhas.\n");
+    }
+    text.push('\n');
+    text
 }
 
 fn same_target(first: &MachineConnection, second: &MachineConnection) -> bool {
