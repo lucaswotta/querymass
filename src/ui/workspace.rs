@@ -372,64 +372,25 @@ impl App {
                     .inner_margin(egui::Margin::symmetric(0, 12)),
             )
             .show_inside(ui, |ui| self.editor_actions(ui));
-        let available = ui.available_size();
-        egui::Frame::new()
-            .fill(Color32::from_rgb(11, 16, 25))
-            .stroke(egui::Stroke::new(1.0_f32, BORDER))
-            .corner_radius(8)
-            .inner_margin(12)
-            .show(ui, |ui| {
-                ui.set_min_size(available - egui::vec2(26.0, 26.0));
-                let line_count = self.workspace.sql.lines().count().max(1);
-                egui::ScrollArea::both()
-                    .id_salt("sql_scroll")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.horizontal_top(|ui| {
-                            ui.label(
-                                RichText::new(
-                                    (1..=line_count)
-                                        .map(|line| line.to_string())
-                                        .collect::<Vec<_>>()
-                                        .join("\n"),
-                                )
-                                .monospace()
-                                .color(Color32::from_rgb(74, 90, 114)),
-                            );
-                            let mut layouter =
-                                |ui: &egui::Ui, text: &dyn egui::TextBuffer, _width: f32| {
-                                    ui.fonts_mut(|fonts| fonts.layout_job(highlight(text.as_str())))
-                                };
-                            let response = ui.add(
-                                egui::TextEdit::multiline(&mut self.workspace.sql)
-                                    .code_editor()
-                                    .id_salt("sql-editor")
-                                    .frame(false)
-                                    .hint_text("SELECT *\nFROM sua_tabela\nLIMIT 100;")
-                                    .desired_width(ui.available_width().max(400.0))
-                                    .layouter(&mut layouter),
-                            );
-                            if let Some(state) = egui::TextEdit::load_state(ui.ctx(), response.id) {
-                                self.sql_selection = state
-                                    .cursor
-                                    .char_range()
-                                    .filter(|range| !range.is_empty())
-                                    .map(|range| {
-                                        let range = range.as_sorted_char_range();
-                                        self.workspace
-                                            .sql
-                                            .chars()
-                                            .skip(range.start)
-                                            .take(range.len())
-                                            .collect()
-                                    });
-                            }
-                            if response.changed() {
-                                self.changed();
-                            }
-                        });
-                    });
-            });
+        let response = sql_editor(ui, &mut self.workspace.sql);
+        if let Some(state) = egui::TextEdit::load_state(ui.ctx(), response.id) {
+            self.sql_selection = state
+                .cursor
+                .char_range()
+                .filter(|range| !range.is_empty())
+                .map(|range| {
+                    let range = range.as_sorted_char_range();
+                    self.workspace
+                        .sql
+                        .chars()
+                        .skip(range.start)
+                        .take(range.len())
+                        .collect()
+                });
+        }
+        if response.changed() {
+            self.changed();
+        }
     }
     fn editor_actions(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
@@ -684,5 +645,75 @@ fn relative_time(timestamp: u64) -> String {
         format!("há {} h", elapsed / 3600)
     } else {
         format!("há {} dias", elapsed / 86400)
+    }
+}
+
+fn sql_editor(ui: &mut egui::Ui, sql: &mut String) -> egui::Response {
+    let available = ui.available_size();
+    egui::Frame::new()
+        .fill(Color32::from_rgb(11, 16, 25))
+        .stroke(egui::Stroke::new(1.0_f32, BORDER))
+        .corner_radius(8)
+        .inner_margin(12)
+        .show(ui, |ui| {
+            ui.set_min_size((available - egui::vec2(26.0, 26.0)).max(egui::Vec2::ZERO));
+            let line_count = sql.lines().count().max(1);
+            egui::ScrollArea::both()
+                .id_salt("sql_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.horizontal_top(|ui| {
+                        let numbers = (1..=line_count)
+                            .map(|line| line.to_string())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        ui.label(
+                            RichText::new(numbers)
+                                .monospace()
+                                .color(Color32::from_rgb(74, 90, 114)),
+                        );
+                        let mut layouter =
+                            |ui: &egui::Ui, text: &dyn egui::TextBuffer, _width: f32| {
+                                ui.fonts_mut(|fonts| fonts.layout_job(highlight(text.as_str())))
+                            };
+                        ui.add(
+                            egui::TextEdit::multiline(sql)
+                                .code_editor()
+                                .id_salt("sql-editor")
+                                .frame(false)
+                                .hint_text("SELECT *\nFROM sua_tabela\nLIMIT 100;")
+                                .desired_width(ui.available_width().max(400.0))
+                                .layouter(&mut layouter),
+                        )
+                    })
+                    .inner
+                })
+                .inner
+        })
+        .inner
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    #[test]
+    fn editor_renders_when_other_panels_leave_almost_no_height() {
+        let context = egui::Context::default();
+        for height in [0.0, 11.0, 25.0, 80.0] {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(300.0, height),
+                )),
+                ..Default::default()
+            };
+            let mut sql = "SELECT 1".to_owned();
+            let _ = context.run(input, |context| {
+                egui::CentralPanel::default().show(context, |ui| {
+                    sql_editor(ui, &mut sql);
+                });
+            });
+            assert_eq!(sql, "SELECT 1");
+        }
     }
 }

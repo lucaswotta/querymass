@@ -4,7 +4,7 @@ use querymass::database::ResultSet;
 
 impl App {
     pub(super) fn results(&mut self, ui: &mut egui::Ui) {
-        ui.set_min_height(ui.available_height());
+        ui.set_min_height(ui.available_height().max(0.0));
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Resultados").size(19.0).strong());
             ui.selectable_value(&mut self.messages_tab, false, "Dados");
@@ -65,7 +65,7 @@ impl App {
             return;
         }
         self.selected_output = self.selected_output.min(self.outputs.len() - 1);
-        let height = ui.available_height();
+        let height = ui.available_height().max(0.0);
         let list_width = if ui.available_width() < 780.0 {
             150.0
         } else {
