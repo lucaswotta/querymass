@@ -35,6 +35,10 @@ pub struct HistoryEntry {
     pub targets: usize,
     pub success: usize,
     pub failed: usize,
+    #[serde(default)]
+    pub cancelled: usize,
+    #[serde(default)]
+    pub unknown: usize,
 }
 #[derive(Serialize, Deserialize)]
 pub struct Workspace {

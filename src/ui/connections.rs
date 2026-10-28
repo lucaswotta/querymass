@@ -5,7 +5,8 @@ impl App {
         if !self.manager {
             return;
         }
-        let mut close = false;
+        let mut close =
+            ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         egui::Modal::new(egui::Id::new("connection_manager")).show(ctx, |ui| {
             ui.set_width(800.0);
             ui.horizontal(|ui| {
@@ -56,6 +57,21 @@ impl App {
                     self.form_success = None;
                 }
             }
+            if self.manager_tab == ManagerTab::Import
+                && let Some(report) = &self.import_report
+            {
+                let count = report.machines.len();
+                ui.separator();
+                if ui
+                    .add_enabled(
+                        count > 0,
+                        primary(format!("Importar {count} conexões válidas")),
+                    )
+                    .clicked()
+                {
+                    self.apply_import();
+                }
+            }
             if self.manager_tab == ManagerTab::Machine {
                 ui.separator();
                 self.machine_actions(ui);
@@ -81,6 +97,7 @@ impl App {
         profile.connection.port = self
             .draft
             .port
+            .trim()
             .parse::<u16>()
             .ok()
             .filter(|port| *port > 0)
@@ -429,6 +446,7 @@ impl App {
                 return;
             }
             self.shared_draft.credential_unavailable = false;
+            self.shared_draft.username = self.shared_draft.username.trim().into();
             self.workspace.shared = self.shared_draft.clone();
             self.changed();
             self.save();
@@ -460,12 +478,18 @@ impl App {
     fn import_form(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("Importar máquinas").size(18.0).strong());
         ui.label(RichText::new("Uma linha por conexão. Colunas: IP, HOSTNAME, LOCATION, PORT, DATABASE, USER e PASSWORD. Só o endereço é obrigatório.").color(MUTED));
-        ui.horizontal(|ui|{
-            if ui.add_enabled(!self.importing,primary(if self.importing{"Lendo arquivo…"}else{"Escolher CSV ou Excel"})).clicked()&& let Some(path)=rfd::FileDialog::new().add_filter("Planilhas",&["csv","xlsx","xlsm"]).pick_file(){self.importing=true;self.import_report=None;self.form_error=None;let sender=self.sender.clone();std::thread::spawn(move||{let _=sender.send(Message::Imported(querymass::import::load_connections(&path)));
-});
-}
-            if ui.button("Baixar modelo CSV").clicked()&& let Some(path)=rfd::FileDialog::new().add_filter("CSV",&["csv"]).set_file_name("querymass-maquinas.csv").save_file()&& let Err(error)=std::fs::write(path,"IP;HOSTNAME;LOCATION;PORT;DATABASE;USER;PASSWORD\n192.0.2.10;PDV 01;Loja Centro;3306;pdv;;\n"){self.form_error=Some(error.to_string());
-}
+        ui.horizontal(|ui| {
+            let label = if self.importing {
+                "Lendo arquivo…"
+            } else {
+                "Escolher CSV ou Excel"
+            };
+            if ui.add_enabled(!self.importing, primary(label)).clicked() {
+                self.choose_import_file();
+            }
+            if ui.button("Baixar modelo CSV").clicked() {
+                self.save_import_template();
+            }
         });
         ui.label(RichText::new("Excel: primeira aba. CSV: separador detectado automaticamente. As máquinas são adicionadas desmarcadas.").size(12.0).color(MUTED));
         let Some(report) = &self.import_report else {
@@ -521,7 +545,7 @@ impl App {
                 }
             });
         }
-        let count = report.machines.len();
+
         ui.separator();
         ui.label("Pasta para todas (opcional; vazio preserva as pastas da planilha)");
         ui.text_edit_singleline(&mut self.import_folder);
@@ -530,14 +554,35 @@ impl App {
             "Guardar senhas importadas no cofre do sistema",
         );
         ui.label(RichText::new("Sem USER, a conexão usa credenciais compartilhadas. Com USER, senha vazia é tratada como senha vazia.").size(12.0).color(MUTED));
-        if ui
-            .add_enabled(
-                count > 0,
-                primary(format!("Importar {count} conexões válidas")),
-            )
-            .clicked()
-        {
-            self.apply_import();
+    }
+    fn choose_import_file(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Planilhas", &["csv", "xlsx", "xlsm"])
+            .pick_file()
+        else {
+            return;
+        };
+        self.importing = true;
+        self.import_report = None;
+        self.form_error = None;
+        let sender = self.sender.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(Message::Imported(querymass::import::load_connections(
+                &path,
+            )));
+        });
+    }
+    fn save_import_template(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("CSV", &["csv"])
+            .set_file_name("querymass-maquinas.csv")
+            .save_file()
+        else {
+            return;
+        };
+        let content = "IP;HOSTNAME;LOCATION;PORT;DATABASE;USER;PASSWORD\n192.0.2.10;PDV 01;Loja Centro;3306;pdv;;\n";
+        if let Err(error) = std::fs::write(path, content) {
+            self.form_error = Some(error.to_string());
         }
     }
     fn apply_import(&mut self) {

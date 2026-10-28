@@ -30,11 +30,18 @@ pub fn capture(ctx: &egui::Context) {
                 continue;
             };
             let write = || -> std::io::Result<()> {
-                let mut file = std::fs::File::create(directory.join(format!("{name}.ppm")))?;
+                let path = directory.join(format!("{name}.ppm"));
+                let temporary = path.with_extension("ppm.tmp");
+                let mut file = std::io::BufWriter::new(std::fs::File::create(&temporary)?);
                 write!(file, "P6\n{} {}\n255\n", image.size[0], image.size[1])?;
-                for pixel in &image.pixels {
-                    file.write_all(&pixel.to_array()[..3])?;
-                }
+                let pixels: Vec<u8> = image
+                    .pixels
+                    .iter()
+                    .flat_map(|pixel| pixel.to_array().into_iter().take(3))
+                    .collect();
+                file.write_all(&pixels)?;
+                file.flush()?;
+                std::fs::rename(temporary, path)?;
                 Ok(())
             };
             if let Err(error) = write() {
@@ -62,6 +69,10 @@ pub fn input(
     if queue.is_empty()
         && let Ok(bytes) = std::fs::read(&request)
     {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+            egui::WindowLevel::AlwaysOnTop,
+        ));
         let _ = std::fs::remove_file(directory.join("input.done"));
         if let Err(error) = std::fs::remove_file(&request) {
             eprintln!("QA input request: {error}");
@@ -180,36 +191,5 @@ pub fn state(app: &super::App, ctx: &egui::Context) {
     let state = serde_json::json!({"manager":app.manager,"profiles":profiles,"folders":app.workspace.folders,"running":app.run.is_some(),"outputs":outputs,"form_error":app.form_error,"notice":app.notice,"sql_length":app.workspace.sql.len(),"pointer":ctx.input(|input|format!("{:?} down={} click={} focus={}",input.pointer.interact_pos(),input.pointer.primary_down(),input.pointer.primary_clicked(),input.focused))});
     if let Ok(bytes) = serde_json::to_vec(&state) {
         let _ = std::fs::write(directory.join("state.json"), bytes);
-    }
-}
-
-pub fn widget(response: &egui::Response, name: &str) {
-    if let Some(directory) = std::env::var_os("QUERYMASS_QA_CAPTURE").map(std::path::PathBuf::from)
-    {
-        let info = format!(
-            "rect={:?} interact={:?} hovered={} clicked={} down={} input={}",
-            response.rect,
-            response.interact_rect,
-            response.hovered(),
-            response.clicked(),
-            response.is_pointer_button_down_on(),
-            response.ctx.input(|input| format!(
-                "pressed={} released={} click={}",
-                input.pointer.primary_pressed(),
-                input.pointer.primary_released(),
-                input.pointer.primary_clicked()
-            ))
-        );
-        let _ = std::fs::write(directory.join(format!("{name}.debug")), &info);
-        if response
-            .ctx
-            .input(|input| input.pointer.primary_pressed() || input.pointer.primary_released())
-            && let Ok(mut file) = std::fs::OpenOptions::new()
-                .append(true)
-                .create(true)
-                .open(directory.join("clicks.log"))
-        {
-            let _ = writeln!(file, "{info}");
-        }
     }
 }

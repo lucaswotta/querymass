@@ -33,8 +33,6 @@ impl App {
                         let connection_button = ui.button("Conexões").on_hover_text(
                             "Adicionar, importar e configurar máquinas e credenciais",
                         );
-                        #[cfg(feature = "ui-qa")]
-                        super::qa::widget(&connection_button, "connections");
                         if connection_button.clicked() {
                             self.open_manager(ManagerTab::Machine);
                         }
@@ -94,7 +92,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Máquinas").size(19.0).strong());
             ui.label(
-                RichText::new(format!("{selected} selecionadas"))
+                RichText::new(counted(selected, "selecionada", "selecionadas"))
                     .size(12.0)
                     .color(BLUE),
             );
@@ -367,26 +365,13 @@ impl App {
                 .color(MUTED),
         );
         ui.add_space(3.0);
-        egui::TopBottomPanel::bottom("editor_actions").frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::symmetric(0,12))).show_inside(ui,|ui|{
-            ui.horizontal(|ui|{
-                if ui.checkbox(&mut self.workspace.read_only,"Somente leitura").on_hover_text("O servidor deve aceitar uma transação READ ONLY. Alterações são bloqueadas no servidor.").changed(){self.changed();
-}
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
-                    if self.run.is_some(){if ui.add_enabled(!self.cancel_requested,egui::Button::new(if self.cancel_requested{"Cancelando…"}else{"Cancelar execução"}).fill(Color32::from_rgb(105,39,51))).clicked(){self.cancel_requested=true;
-if let Some(run)=&self.run{run.cancel();
-}}}
-                    else{let selected=self.workspace.profiles.iter().filter(|p|p.selected).count();let enabled=selected>0&&!self.workspace.sql.trim().is_empty();
-if ui.add_enabled(enabled,primary(format!("Executar {} em {selected} máquina(s)", if self.sql_selection.is_some() {"seleção"} else {"SQL"}))).on_hover_text("Ctrl+Enter").clicked(){self.request_run();
-}}
-                });
-            });
-            if !self.workspace.read_only{
-ui.label(RichText::new("Alterações habilitadas. Você revisará os alvos antes de enviar o SQL.").size(12.0).color(AMBER));
-}
-            else if self.workspace.profiles.iter().all(|p|!p.selected){
-ui.label(RichText::new("Marque uma máquina para habilitar a execução.  Ctrl+Enter executa.").size(12.0).color(MUTED));
-}
-        });
+        egui::TopBottomPanel::bottom("editor_actions")
+            .frame(
+                egui::Frame::new()
+                    .fill(BG)
+                    .inner_margin(egui::Margin::symmetric(0, 12)),
+            )
+            .show_inside(ui, |ui| self.editor_actions(ui));
         let available = ui.available_size();
         egui::Frame::new()
             .fill(Color32::from_rgb(11, 16, 25))
@@ -446,35 +431,77 @@ ui.label(RichText::new("Marque uma máquina para habilitar a execução.  Ctrl+E
                     });
             });
     }
+    fn editor_actions(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui.checkbox(&mut self.workspace.read_only,"Somente leitura")
+                .on_hover_text("O servidor deve aceitar uma transação READ ONLY. Alterações são bloqueadas no servidor.")
+                .changed() { self.changed(); }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some(run) = &self.run {
+                    let label=if self.cancel_requested {"Cancelando…"} else {"Cancelar execução"};
+                    if ui.add_enabled(!self.cancel_requested,egui::Button::new(label).fill(Color32::from_rgb(105,39,51))).clicked() {
+                        self.cancel_requested=true;
+                        run.cancel();
+                    }
+                } else {
+                    let count=self.workspace.profiles.iter().filter(|profile|profile.selected).count();
+                    let enabled=count>0&&!self.workspace.sql.trim().is_empty();
+                    let part=if self.sql_selection.is_some() {"seleção"} else {"SQL"};
+                    let label=format!("Executar {part} em {}", counted(count,"máquina","máquinas"));
+                    if ui.add_enabled(enabled,primary(label)).on_hover_text("Ctrl+Enter. Com texto selecionado, executa apenas a seleção.").clicked() { self.request_run(); }
+                }
+            });
+        });
+        if !self.workspace.read_only {
+            ui.label(
+                RichText::new(
+                    "Alterações habilitadas. Você revisará os alvos antes de enviar o SQL.",
+                )
+                .size(12.0)
+                .color(AMBER),
+            );
+        } else if self
+            .workspace
+            .profiles
+            .iter()
+            .all(|profile| !profile.selected)
+        {
+            ui.label(
+                RichText::new("Marque uma máquina para habilitar a execução. Ctrl+Enter executa.")
+                    .size(12.0)
+                    .color(MUTED),
+            );
+        }
+    }
     pub(super) fn confirmation_dialog(&mut self, ctx: &egui::Context) {
         let Some(snapshot) = &mut self.confirmation else {
             return;
         };
         let mut execute = false;
-        let mut cancel = false;
-        egui::Modal::new(egui::Id::new("confirm_run")).show(ctx,|ui|{
+        let mut cancel =
+            ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        egui::Modal::new(egui::Id::new("confirm_run")).show(ctx, |ui| {
             ui.set_width(650.0);
-ui.heading("Revisar alterações");
-ui.label(RichText::new(format!("{} instrução(ões) em {} máquina(s)",snapshot.statements,snapshot.targets.len())).color(AMBER));
+            ui.heading("Revisar alterações");
+            ui.label(RichText::new(format!("{} em {}",counted(snapshot.statements,"instrução","instruções"),counted(snapshot.targets.len(),"máquina","máquinas"))).color(AMBER));
             ui.label("Cada servidor executa de forma independente. Uma falha não desfaz alterações já feitas em outros servidores.");
-            egui::ScrollArea::vertical().id_salt("confirm_targets").max_height(180.0).show(ui,|ui|{for (_,machine)in &snapshot.targets{
-ui.label(format!("{} · {}:{} · {}",machine.name,machine.host,machine.port,if machine.database.is_empty(){"sem banco padrão"}else{&machine.database}));
-}});
-            egui::ScrollArea::vertical().id_salt("confirm_sql").max_height(140.0).show(ui,|ui|{
-ui.monospace(&snapshot.sql);
-});
+            egui::ScrollArea::vertical().id_salt("confirm_targets").max_height(180.0).show(ui, |ui| {
+                for (_,machine) in &snapshot.targets {
+                    let database=if machine.database.is_empty() {"sem banco padrão"} else {&machine.database};
+                    ui.label(format!("{} · {}:{} · {database}",machine.name,machine.host,machine.port));
+                }
+            });
+            egui::ScrollArea::vertical().id_salt("confirm_sql").max_height(140.0).show(ui, |ui| {ui.monospace(&snapshot.sql);});
             let expected=format!("EXECUTAR {}",snapshot.targets.len());
-ui.label(format!("Para confirmar, digite {expected}"));
-ui.text_edit_singleline(&mut snapshot.phrase);
-            ui.horizontal(|ui|{if ui.button("Voltar ao editor").clicked(){cancel=true;
-}
-if ui.add_enabled(snapshot.phrase==expected,egui::Button::new("Confirmar e executar").fill(Color32::from_rgb(140,48,65))).clicked(){execute=true;
-}});
+            ui.label(format!("Para confirmar, digite {expected}"));
+            ui.text_edit_singleline(&mut snapshot.phrase);
+            ui.horizontal(|ui| {
+                if ui.button("Voltar ao editor").clicked() { cancel=true; }
+                if ui.add_enabled(snapshot.phrase==expected,egui::Button::new("Confirmar e executar").fill(Color32::from_rgb(140,48,65))).clicked() { execute=true; }
+            });
         });
-        if execute {
-            if let Some(snapshot) = self.confirmation.take() {
-                self.start(snapshot.targets, snapshot.sql);
-            }
+        if execute && let Some(snapshot) = self.confirmation.take() {
+            self.start(snapshot.targets, snapshot.sql);
         } else if cancel {
             self.confirmation = None;
         }
@@ -484,7 +511,8 @@ if ui.add_enabled(snapshot.phrase==expected,egui::Button::new("Confirmar e execu
             return;
         };
         let mut confirm = false;
-        let mut cancel = false;
+        let mut cancel =
+            ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         egui::Modal::new(egui::Id::new("delete")).show(ctx, |ui| {
             ui.set_width(430.0);
             ui.heading(match target {
@@ -547,20 +575,23 @@ if ui.add_enabled(snapshot.phrase==expected,egui::Button::new("Confirmar e execu
         }
         let mut open = true;
         let mut load = None;
-        egui::Window::new("Histórico de consultas").open(&mut open).default_size([700.0,500.0]).show(ctx,|ui|{
-ui.label(RichText::new("Carregar uma consulta não a executa. Resultados e senhas não são gravados no histórico.").color(MUTED));
-if self.workspace.history.is_empty(){
-ui.label("As consultas executadas aparecerão aqui.");
-}egui::ScrollArea::vertical().show(ui,|ui|{for (index,entry)in self.workspace.history.iter().enumerate(){egui::Frame::group(ui.style()).show(ui,|ui|{
-ui.label(format!("{} alvos · {} sucesso(s) · {} falha(s) · registro {}",entry.targets,entry.success,entry.failed,entry.when));
-ui.monospace(entry.sql.chars().take(240).collect::<String>());
-if ui.button("Carregar no editor").clicked(){load=Some(index);
-}});
-}});
-});
+        egui::Window::new("Histórico de consultas").open(&mut open).default_size([700.0,500.0]).show(ctx, |ui| {
+            ui.label(RichText::new("Carregar uma consulta não a executa. Resultados e senhas não são gravados no histórico.").color(MUTED));
+            if self.workspace.history.is_empty() {ui.label("As consultas executadas aparecerão aqui.");}
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for (index,entry) in self.workspace.history.iter().enumerate() {
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.label(format!("{} · {} alvos · {} sucesso · {} falhas · {} canceladas · {} desconhecidas",relative_time(entry.when),entry.targets,entry.success,entry.failed,entry.cancelled,entry.unknown));
+                        ui.monospace(entry.sql.chars().take(240).collect::<String>());
+                        if ui.button("Carregar no editor").clicked() {load=Some(index);}
+                    });
+                }
+            });
+        });
         self.history_open = open;
         if let Some(index) = load {
             self.workspace.sql = self.workspace.history[index].sql.clone();
+            self.sql_selection = None;
             self.history_open = false;
             self.changed();
         }
@@ -637,4 +668,21 @@ fn highlight(text: &str) -> egui::text::LayoutJob {
         );
     }
     job
+}
+
+fn relative_time(timestamp: u64) -> String {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .saturating_sub(timestamp);
+    if elapsed < 60 {
+        "agora".into()
+    } else if elapsed < 3600 {
+        format!("há {} min", elapsed / 60)
+    } else if elapsed < 86400 {
+        format!("há {} h", elapsed / 3600)
+    } else {
+        format!("há {} dias", elapsed / 86400)
+    }
 }

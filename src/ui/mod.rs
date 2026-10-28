@@ -126,6 +126,8 @@ pub struct App {
     messages_tab: bool,
     row_selection: BTreeSet<usize>,
     result_search: String,
+    sort_column: Option<usize>,
+    sort_descending: bool,
     history_open: bool,
     result_bytes: usize,
     cancel_requested: bool,
@@ -191,6 +193,8 @@ impl App {
             messages_tab: false,
             row_selection: BTreeSet::new(),
             result_search: String::new(),
+            sort_column: None,
+            sort_descending: false,
             history_open: false,
             result_bytes: 0,
             cancel_requested: false,
@@ -328,6 +332,7 @@ impl App {
         self.selected_set = 0;
         self.row_selection.clear();
         self.result_search.clear();
+        self.sort_column = None;
         self.result_bytes = 0;
         self.cancel_requested = false;
         self.logs.push(format!(
@@ -458,7 +463,24 @@ impl App {
                         failed: self
                             .outputs
                             .iter()
-                            .filter(|o| o.outcome != Outcome::Success)
+                            .filter(|output| {
+                                matches!(
+                                    output.outcome,
+                                    Outcome::Failed | Outcome::Partial | Outcome::TimedOut
+                                )
+                            })
+                            .count(),
+                        cancelled: self
+                            .outputs
+                            .iter()
+                            .filter(|output| output.outcome == Outcome::Cancelled)
+                            .count()
+                            + self.run_total
+                            - self.outputs.len(),
+                        unknown: self
+                            .outputs
+                            .iter()
+                            .filter(|output| output.outcome == Outcome::Unknown)
                             .count(),
                     },
                 );
@@ -622,9 +644,9 @@ fn theme(ctx: &egui::Context) {
         .text_styles
         .insert(egui::TextStyle::Monospace, egui::FontId::monospace(14.0));
     let mut visuals = egui::Visuals::dark();
-    visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(6);
-    visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(6);
-    visuals.widgets.active.corner_radius = egui::CornerRadius::same(6);
+    visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(3);
+    visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(3);
+    visuals.widgets.active.corner_radius = egui::CornerRadius::same(3);
     visuals.panel_fill = PANEL;
     visuals.window_fill = PANEL;
     visuals.extreme_bg_color = BG;
@@ -639,4 +661,8 @@ fn theme(ctx: &egui::Context) {
     visuals.window_corner_radius = egui::CornerRadius::same(12);
     style.visuals = visuals;
     ctx.set_style(style);
+}
+
+fn counted(count: usize, singular: &str, plural: &str) -> String {
+    format!("{count} {}", if count == 1 { singular } else { plural })
 }
