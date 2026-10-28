@@ -97,16 +97,26 @@ struct QueryMassApp {
     defaults: MysqlDefaults,
     machine_form: MachineForm,
     show_add_machine: bool,
+    editing_machine_id: Option<u64>,
+    pending_delete: Option<DeleteTarget>,
+    editing_folder: Option<String>,
+    folder_name: String,
     show_defaults: bool,
     show_run_confirmation: bool,
     confirmation_text: String,
     import_message: String,
+    status_message: String,
     form_error: String,
     outputs: Vec<QueryOutput>,
     running: bool,
     pending_results: usize,
     result_sender: mpsc::Sender<QueryOutput>,
     result_receiver: mpsc::Receiver<QueryOutput>,
+}
+
+enum DeleteTarget {
+    Machine(u64, String),
+    Folder(String, usize),
 }
 
 impl Default for QueryMassApp {
@@ -119,10 +129,15 @@ impl Default for QueryMassApp {
             defaults: MysqlDefaults::default(),
             machine_form: MachineForm::default(),
             show_add_machine: false,
+            editing_machine_id: None,
+            pending_delete: None,
+            editing_folder: None,
+            folder_name: String::new(),
             show_defaults: false,
             show_run_confirmation: false,
             confirmation_text: String::new(),
             import_message: String::new(),
+            status_message: String::new(),
             form_error: String::new(),
             outputs: Vec::new(),
             running: false,
@@ -139,27 +154,85 @@ impl eframe::App for QueryMassApp {
         apply_querymass_theme(context);
 
         egui::TopBottomPanel::top("toolbar").show(context, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
+                ui.menu_button("Arquivo", |ui| {
+                    if ui.button("Nova conexão MySQL").clicked() {
+                        self.open_new_machine();
+                        ui.close();
+                    }
+                    if ui.button("Importar CSV / Excel…").clicked() {
+                        self.import_connections();
+                        ui.close();
+                    }
+                    if ui.button("Credenciais padrão…").clicked() {
+                        self.show_defaults = true;
+                        ui.close();
+                    }
+                    if ui.button("Sair").clicked() {
+                        context.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+                ui.menu_button("Conexões", |ui| {
+                    if ui.button("Selecionar todas").clicked() {
+                        for machine in &mut self.machines {
+                            machine.selected = true;
+                        }
+                        ui.close();
+                    }
+                    if ui.button("Limpar seleção").clicked() {
+                        for machine in &mut self.machines {
+                            machine.selected = false;
+                        }
+                        ui.close();
+                    }
+                });
+                ui.menu_button("Consulta", |ui| {
+                    if ui.button("Executar SQL").clicked() {
+                        self.request_query_execution();
+                        ui.close();
+                    }
+                    if ui.button("Limpar editor").clicked() {
+                        self.query.clear();
+                        ui.close();
+                    }
+                });
+                ui.menu_button("Ajuda", |ui| {
+                    ui.label("QueryMass · cliente MySQL em massa");
+                });
+            });
+            ui.separator();
             ui.horizontal(|ui| {
                 ui.add_space(4.0);
                 draw_brand_mark(ui);
                 ui.label(egui::RichText::new("QueryMass").strong().size(16.0));
                 ui.label(egui::RichText::new("MySQL").color(color(0x969EB2)));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let selected = self.selected_count();
-                    let label = if self.running {
-                        "Executando…".to_owned()
-                    } else {
-                        format!("Executar em {selected}")
-                    };
-                    let enabled = !self.running && selected > 0 && !self.query.trim().is_empty();
-                    if ui
-                        .add_enabled(enabled, egui::Button::new(label).fill(color(0x4F8CFF)))
-                        .clicked()
-                    {
-                        self.confirmation_text.clear();
-                        self.show_run_confirmation = true;
-                    }
-                });
+                ui.separator();
+                if ui.button("＋ Conexão").clicked() {
+                    self.open_new_machine();
+                }
+                if ui.button("Importar").clicked() {
+                    self.import_connections();
+                }
+                if ui.button("Credenciais").clicked() {
+                    self.show_defaults = true;
+                }
+                ui.separator();
+                let selected = self.selected_count();
+                ui.label(format!("{selected} selecionada(s)"));
+                let label = if self.running {
+                    "Executando…"
+                } else {
+                    "▶ Executar SQL"
+                };
+                if ui
+                    .add_enabled(
+                        !self.running,
+                        egui::Button::new(label).fill(color(0x4F8CFF)),
+                    )
+                    .clicked()
+                {
+                    self.request_query_execution();
+                }
             });
         });
 
@@ -188,6 +261,18 @@ impl eframe::App for QueryMassApp {
                         .size(12.0)
                         .color(color(0x697187)),
                 );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(
+                            !self.running,
+                            egui::Button::new("▶ Executar consulta").fill(color(0x4F8CFF)),
+                        )
+                        .clicked()
+                    {
+                        self.request_query_execution();
+                    }
+                    ui.label(format!("{} alvo(s)", self.selected_count()));
+                });
             });
             ui.add_space(8.0);
             ui.add_sized(
@@ -200,6 +285,8 @@ impl eframe::App for QueryMassApp {
         });
 
         self.show_add_machine_window(context);
+        self.show_delete_confirmation(context);
+        self.show_folder_editor(context);
         self.show_defaults_window(context);
         self.show_run_confirmation_window(context);
     }
@@ -282,12 +369,11 @@ impl QueryMassApp {
             folders.entry(folder).or_default().push(index);
         }
 
-        let mut remove_ids = Vec::new();
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (folder, indexes) in folders {
                 let all_selected = indexes.iter().all(|index| self.machines[*index].selected);
                 let mut select_folder = all_selected;
-                ui.horizontal(|ui| {
+                let row = ui.horizontal(|ui| {
                     if ui.checkbox(&mut select_folder, "").changed() {
                         for index in &indexes {
                             self.machines[*index].selected = select_folder;
@@ -295,8 +381,10 @@ impl QueryMassApp {
                     }
                     ui.collapsing(format!("{folder}  ·  {}", indexes.len()), |ui| {
                         for index in &indexes {
-                            let machine = &mut self.machines[*index];
-                            ui.horizontal(|ui| {
+                            let machine_id = self.machines[*index].id;
+                            let machine_name = self.machines[*index].connection.name.clone();
+                            let machine_row = ui.horizontal(|ui| {
+                                let machine = &mut self.machines[*index];
                                 ui.checkbox(&mut machine.selected, "");
                                 ui.vertical(|ui| {
                                     ui.label(
@@ -318,20 +406,38 @@ impl QueryMassApp {
                                         .color(color(0x969EB2)),
                                     );
                                 });
-                                if ui.small_button("×").clicked() {
-                                    remove_ids.push(machine.id);
+                            });
+                            machine_row.response.context_menu(|ui| {
+                                if ui.button("Configurar máquina…").clicked() {
+                                    self.edit_machine(machine_id);
+                                    ui.close();
+                                }
+                                if ui.button("Excluir máquina…").clicked() {
+                                    self.pending_delete = Some(DeleteTarget::Machine(
+                                        machine_id,
+                                        machine_name.clone(),
+                                    ));
+                                    ui.close();
                                 }
                             });
                             ui.add_space(4.0);
                         }
                     });
                 });
+                row.response.context_menu(|ui| {
+                    if ui.button("Renomear pasta…").clicked() {
+                        self.folder_name = folder.clone();
+                        self.editing_folder = Some(folder.clone());
+                        ui.close();
+                    }
+                    if ui.button("Excluir pasta e máquinas…").clicked() {
+                        self.pending_delete =
+                            Some(DeleteTarget::Folder(folder.clone(), indexes.len()));
+                        ui.close();
+                    }
+                });
             }
         });
-        if !remove_ids.is_empty() {
-            self.machines
-                .retain(|machine| !remove_ids.contains(&machine.id));
-        }
     }
 
     fn show_output_panel(&self, ui: &mut egui::Ui) {
@@ -358,6 +464,9 @@ impl QueryMassApp {
             });
         });
         ui.separator();
+        if !self.status_message.is_empty() {
+            ui.label(egui::RichText::new(&self.status_message).color(color(0xFF5D70)));
+        }
         egui::ScrollArea::vertical().show(ui, |ui| {
             if self.outputs.is_empty() {
                 ui.add_space(4.0);
@@ -424,7 +533,12 @@ impl QueryMassApp {
         }
         let mut open = self.show_add_machine;
         let mut submit = false;
-        egui::Window::new("Adicionar máquina MySQL")
+        let title = if self.editing_machine_id.is_some() {
+            "Configurar máquina MySQL"
+        } else {
+            "Adicionar máquina MySQL"
+        };
+        egui::Window::new(title)
             .open(&mut open)
             .resizable(false)
             .show(context, |ui| {
@@ -457,7 +571,12 @@ impl QueryMassApp {
                         ui.end_row();
                     });
                 ui.add_space(8.0);
-                if ui.button("Adicionar máquina").clicked() {
+                let submit_label = if self.editing_machine_id.is_some() {
+                    "Salvar alterações"
+                } else {
+                    "Adicionar máquina"
+                };
+                if ui.button(submit_label).clicked() {
                     submit = true;
                 }
                 if !self.form_error.is_empty() {
@@ -468,7 +587,17 @@ impl QueryMassApp {
         if submit {
             match self.machine_form.build_connection() {
                 Ok(connection) => {
-                    self.add_machine(connection);
+                    if let Some(machine_id) = self.editing_machine_id.take() {
+                        if let Some(machine) = self
+                            .machines
+                            .iter_mut()
+                            .find(|machine| machine.id == machine_id)
+                        {
+                            machine.connection = connection;
+                        }
+                    } else {
+                        self.add_machine(connection);
+                    }
                     self.machine_form = MachineForm::new(&self.defaults);
                     self.show_add_machine = false;
                     self.form_error.clear();
@@ -506,6 +635,133 @@ impl QueryMassApp {
                 );
             });
         self.show_defaults = open;
+    }
+
+    fn open_new_machine(&mut self) {
+        self.editing_machine_id = None;
+        self.machine_form = MachineForm::new(&self.defaults);
+        self.form_error.clear();
+        self.show_add_machine = true;
+    }
+
+    fn edit_machine(&mut self, machine_id: u64) {
+        let Some(machine) = self
+            .machines
+            .iter()
+            .find(|machine| machine.id == machine_id)
+        else {
+            return;
+        };
+        self.machine_form = MachineForm {
+            name: machine.connection.name.clone(),
+            host: machine.connection.host.clone(),
+            folder: machine.connection.folder.clone(),
+            port: machine.connection.port.to_string(),
+            database: machine.connection.database.clone(),
+            username: machine.connection.username.clone(),
+            password: machine.connection.password.clone(),
+        };
+        self.editing_machine_id = Some(machine_id);
+        self.form_error.clear();
+        self.show_add_machine = true;
+    }
+
+    fn request_query_execution(&mut self) {
+        if self.query.trim().is_empty() {
+            self.status_message = "Digite um comando SQL no editor antes de executar.".to_owned();
+        } else if self.selected_count() == 0 {
+            self.status_message = "Marque uma ou mais máquinas no painel à esquerda.".to_owned();
+        } else {
+            self.status_message.clear();
+            self.confirmation_text.clear();
+            self.show_run_confirmation = true;
+        }
+    }
+
+    fn show_delete_confirmation(&mut self, context: &egui::Context) {
+        let Some(target) = &self.pending_delete else {
+            return;
+        };
+        let (title, message) = match target {
+            DeleteTarget::Machine(_, name) => {
+                ("Excluir máquina", format!("Excluir a conexão {name}?"))
+            }
+            DeleteTarget::Folder(folder, count) => (
+                "Excluir pasta",
+                format!("Excluir a pasta {folder} e suas {count} máquinas?"),
+            ),
+        };
+        let mut open = true;
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Window::new(title)
+            .open(&mut open)
+            .resizable(false)
+            .show(context, |ui| {
+                ui.label(message);
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Excluir").clicked() {
+                        confirm = true;
+                    }
+                    if ui.button("Cancelar").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if confirm {
+            match self.pending_delete.take().expect("pending deletion exists") {
+                DeleteTarget::Machine(id, _) => self.machines.retain(|machine| machine.id != id),
+                DeleteTarget::Folder(folder, _) => self.machines.retain(|machine| {
+                    let machine_folder = if machine.connection.folder.trim().is_empty() {
+                        "Sem pasta"
+                    } else {
+                        &machine.connection.folder
+                    };
+                    machine_folder != folder
+                }),
+            }
+        } else if cancel || !open {
+            self.pending_delete = None;
+        }
+    }
+
+    fn show_folder_editor(&mut self, context: &egui::Context) {
+        let Some(old_folder) = self.editing_folder.clone() else {
+            return;
+        };
+        let mut open = true;
+        let mut save = false;
+        egui::Window::new("Renomear pasta")
+            .open(&mut open)
+            .resizable(false)
+            .show(context, |ui| {
+                ui.label(format!("Nome atual: {old_folder}"));
+                ui.text_edit_singleline(&mut self.folder_name);
+                if ui.button("Salvar").clicked() {
+                    save = true;
+                }
+            });
+        if save {
+            let new_folder = if self.folder_name.trim() == "Sem pasta" {
+                String::new()
+            } else {
+                self.folder_name.trim().to_owned()
+            };
+            for machine in &mut self.machines {
+                let current_folder = if machine.connection.folder.trim().is_empty() {
+                    "Sem pasta"
+                } else {
+                    &machine.connection.folder
+                };
+                if current_folder == old_folder {
+                    machine.connection.folder = new_folder.clone();
+                }
+            }
+            self.editing_folder = None;
+        } else if !open {
+            self.editing_folder = None;
+        }
     }
 
     fn show_run_confirmation_window(&mut self, context: &egui::Context) {
@@ -682,9 +938,10 @@ impl QueryMassApp {
             })
             .collect();
         if selected.is_empty() {
-            self.import_message = "Selecione ao menos uma máquina.".to_owned();
+            self.status_message = "Selecione uma ou mais máquinas no painel à esquerda.".to_owned();
             return;
         }
+        self.status_message.clear();
         self.outputs.clear();
         self.pending_results = selected.len();
         self.running = true;
