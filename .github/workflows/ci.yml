@@ -1,0 +1,33 @@
+name: desktop
+on:
+  push:
+    branches: [main, 'feat/**']
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  quality:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: ilammy/setup-nasm@v1
+        if: runner.os == 'Windows'
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --all-targets --all-features
+      - run: cargo build --locked --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: querymass-${{ runner.os }}
+          path: |
+            target/release/querymass
+            target/release/querymass.exe
+          if-no-files-found: error

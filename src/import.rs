@@ -10,6 +10,7 @@ pub struct ImportReport {
     pub machines: Vec<MachineConnection>,
     pub rows_without_host: Vec<usize>,
     pub duplicate_rows: Vec<usize>,
+    pub issues: Vec<String>,
 }
 
 pub fn load_connections(path: &Path) -> Result<ImportReport, String> {
@@ -47,11 +48,12 @@ fn read_csv(path: &Path) -> Result<ImportReport, String> {
 fn detect_delimiter(path: &Path) -> Result<u8, String> {
     let file = std::fs::File::open(path)
         .map_err(|error| format!("Não foi possível ler o CSV: {error}"))?;
-    let mut sample = String::new();
+    let mut sample = Vec::new();
     BufReader::new(file)
         .take(65_536)
-        .read_to_string(&mut sample)
+        .read_to_end(&mut sample)
         .map_err(|error| format!("Não foi possível ler o CSV: {error}"))?;
+    let sample = String::from_utf8_lossy(&sample);
     let first_line = sample.lines().next().unwrap_or_default();
     let mut counts = [(b',', 0usize), (b';', 0), (b'\t', 0), (b'|', 0)];
     let mut quoted = false;
@@ -108,10 +110,17 @@ where
     let mut seen = HashSet::new();
     let mut rows_without_host = Vec::new();
     let mut duplicate_rows = Vec::new();
+    let mut issues = Vec::new();
 
     for (index, row) in rows.into_iter().enumerate() {
         let row_number = index + 2;
-        let mut row = row?;
+        let mut row = match row {
+            Ok(row) => row,
+            Err(error) => {
+                issues.push(format!("Linha {row_number}: {error}"));
+                continue;
+            }
+        };
         while row.last().is_some_and(|value| value.trim().is_empty()) {
             row.pop();
         }
@@ -119,16 +128,29 @@ where
             continue;
         }
         if row.len() > columns.width {
-            return Err(format!(
+            issues.push(format!(
                 "A linha {row_number} tem mais valores do que o cabeçalho."
             ));
+            continue;
         }
         row.resize(columns.width, String::new());
-        let Some(connection) = columns.machine(&row, row_number)? else {
+        let connection = match columns.machine(&row, row_number) {
+            Ok(connection) => connection,
+            Err(error) => {
+                issues.push(error);
+                continue;
+            }
+        };
+        let Some(connection) = connection else {
             rows_without_host.push(row_number);
             continue;
         };
-        let key = (connection.host.to_ascii_lowercase(), connection.port);
+        let key = (
+            connection.host.to_ascii_lowercase(),
+            connection.port,
+            connection.database.clone(),
+            connection.username.clone(),
+        );
         if !seen.insert(key) {
             duplicate_rows.push(row_number);
             continue;
@@ -136,13 +158,11 @@ where
         machines.push(connection);
     }
 
-    if machines.is_empty() {
-        return Err("Nenhuma máquina com IP válido foi encontrada.".to_owned());
-    }
     Ok(ImportReport {
         machines,
         rows_without_host,
         duplicate_rows,
+        issues,
     })
 }
 
@@ -193,8 +213,8 @@ impl HeaderMap {
             folder: find(&["location", "local", "folder", "pasta", "group", "grupo"]),
             port: find(&["port", "porta", "mysqlport"]),
             database: find(&["database", "db", "banco", "base"]),
-            username: find(&["user", "username", "login", "usuario", "sshuser"]),
-            password: find(&["password", "pass", "senha", "sshpassword"]),
+            username: find(&["user", "username", "login", "usuario"]),
+            password: find(&["password", "pass", "senha"]),
         })
     }
 
@@ -251,6 +271,8 @@ impl HeaderMap {
                 .trim()
                 .to_owned(),
             password: self.password.map(value).unwrap_or_default().to_owned(),
+            tls: false,
+            ca_path: None,
         }))
     }
 }
@@ -266,4 +288,56 @@ fn normalize(value: &str) -> String {
         .replace(['ú'], "u")
         .replace(['ç'], "c")
         .replace([' ', '-', '_'], "")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn collects_invalid_rows_without_discarding_valid_connections() {
+        let report = parse_rows(
+            vec!["IP".into(), "PORT".into(), "DATABASE".into()],
+            vec![
+                Ok(vec!["192.0.2.1".into(), "3306".into(), "one".into()]),
+                Ok(vec!["192.0.2.2".into(), "bad".into()]),
+                Ok(vec!["192.0.2.1".into(), "3306".into(), "two".into()]),
+                Ok(vec!["192.0.2.1".into(), "3306".into(), "one".into()]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(report.machines.len(), 2);
+        assert_eq!(report.issues.len(), 1);
+        assert_eq!(report.duplicate_rows, vec![5]);
+    }
+    #[test]
+    fn preserves_explicit_empty_password_and_normalizes_headers() {
+        let report = parse_rows(
+            vec![
+                "\u{feff}IP".into(),
+                "Usuário".into(),
+                "Senha".into(),
+                "Pasta".into(),
+            ],
+            vec![Ok(vec![
+                "192.0.2.1".into(),
+                "own".into(),
+                "".into(),
+                "Centro".into(),
+            ])],
+        )
+        .unwrap();
+        assert_eq!(report.machines[0].username, "own");
+        assert!(report.machines[0].password.is_empty());
+        assert_eq!(report.machines[0].folder, "Centro");
+    }
+    #[test]
+    fn delimiter_sample_can_end_inside_utf8_character() {
+        let path = std::env::temp_dir().join(format!("querymass-csv-{}.csv", std::process::id()));
+        let mut contents = "IP;HOSTNAME\n192.0.2.1;".to_owned();
+        contents.push_str(&"é".repeat(40000));
+        std::fs::write(&path, contents).unwrap();
+        let report = read_csv(&path).unwrap();
+        assert_eq!(report.machines.len(), 1);
+        std::fs::remove_file(path).unwrap();
+    }
 }
